@@ -8,6 +8,8 @@ import numpy as np
 from scipy import signal
 import cvxpy as cp
 
+from bmi.solution import BMISolution
+
 class OrderStatus(Enum):
     UNSET     = auto()   # not yet determined
     FIXED     = auto()   # user-specified (alt. min, CCL)
