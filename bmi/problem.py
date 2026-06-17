@@ -1,29 +1,26 @@
 """
 BMI Module - Problem definition
 """
-
 import numpy as np
 from scipy import signal
-import cvxpy as cp
-
-from bmi.solution import BMISolution
 
 class BMIProblem:
     def __init__(
         self,
         n_filter: int,
         n_input: int = 1,    # filter inputs
-        n_output: int = 1,   # filter outputs
-        gamma: float = 1.0,
-    ):
-        self.n_filter = n_filter
-        self.n_input  = n_input
-        self.n_output = n_output
-        self.gamma    = gamma
+        n_output: int = 1   # filter outputs
+        ):
+
+        self.n_f = n_filter
+        self.n_i = n_input
+        self.n_o = n_output
+        # Output filter order set to 4
+        self.outFilterOrder = 4
+        # Combined system order
+        self.n = self.n_f + self.outFilterOrder
 
         self._output_filter = self._build_output_filter()
-        self._init_variables()
-        self._build_system()
 
     # ── Output filter (internal, fixed for now) ────────────────────
 
@@ -33,59 +30,91 @@ class BMIProblem:
         Hardcoded for now; later could accept a user-supplied StateSpace.
         """
         # Simple lowpass Butterworth filter, order 4, cutoff at pi/32
-        order  = 4
+        self.outFilterOrder = 4
         cutoff = np.pi / 32
-        b, a   = signal.butter(order, cutoff / np.pi, btype='low')
+        b, a = signal.butter(self.outFilterOrder, cutoff / np.pi, btype='low')
         # Convert to state space reprezentation
         A_w, B_w, C_w, D_w = signal.tf2ss(b, a)
         return signal.StateSpace(A_w, B_w, C_w, D_w)
 
-    # ── CVXPY variable initialization ──────────────────────────────
+    # ── Dimension validation ───────────────────────────────────────
 
-    def _init_variables(self) -> None:
-        n_f = self.n_filter
-        n_i = self.n_input
-        n_o = self.n_output
+    @staticmethod
+    def _raise_if_mismatch(expected: dict, actual: dict, context: str) -> None:
+        """
+        Format output error for dimension validation
+        """
+        mismatches = [
+            f"{name}: expected {expected[name]}, got {actual[name]}"
+            for name in expected
+            if actual[name] != expected[name]
+        ]
+        if mismatches:
+            raise ValueError(f"Dimension mismatch in {context}:\n  " + "\n  ".join(mismatches))
 
-        self.A_f = cp.Variable((n_f, n_f))
-        self.B_f = cp.Variable((n_f, n_i))
-        self.C_f = cp.Variable((n_o, n_f))
-        self.D_f = cp.Variable((n_o, n_i))
-        # Lyapunov matrix P will be initialized once system state space defined
+    def _check_filter_dims(self, A_f, B_f, C_f, D_f) -> None:
+        expected = {
+            "A_f": (self.n_f, self.n_f),
+            "B_f": (self.n_f, self.n_i),
+            "C_f": (self.n_o, self.n_f),
+            "D_f": (self.n_o, self.n_i),
+        }
+        actual = {"A_f": A_f.shape, "B_f": B_f.shape, "C_f": C_f.shape, "D_f": D_f.shape}
+        self._raise_if_mismatch(expected, actual, context="filter matrices")
 
-    # ── Define BMI Involved Matrixes  ──────────────────────────────
-    def _build_system(self):
-        # First get state space output filter
-        A_w, B_w, C_w, D_w = self._build_output_filter()
+    def _check_bmi_dims(self, P, A, B, C, D) -> None:
+        expected = {
+            "P": (self.n, self.n),
+            "A": (self.n, self.n),
+            "B": (self.n, self.n_i),
+            "C": (self.n_o, self.n),
+            "D": (self.n_o, self.n_i),
+        }
+        actual = {"P": P.shape, "A": A.shape, "B": B.shape, "C": C.shape, "D": D.shape}
+        self._raise_if_mismatch(expected, actual, context="combined system / BMI")
+
+    # ── Public API : BMI Involved Matrixes  ──────────────────────────
+    def build_system(self, A_f, B_f, C_f, D_f):
+        """
+        Combined system state space realization building
+        """
+        # Ensure input arrays have right dimension
+        self._check_filter_dims(A_f, B_f, C_f, D_f)
+        
+        # Extract state space output filter
+        A_w = self._output_filter.A
+        B_w = self._output_filter.B
+        C_w = self._output_filter.C
+        D_w = self._output_filter.D
         
         # Assemble block matrixes
-        self.A = np.block([
-            [self.A_f, np.zeros(self.n_f,A_w.shape[1])],
-            [B_w @ self.C_f, A_w]
+        A = np.block([
+            [A_f, np.zeros(self.n_f,self.outFilterOrder)],
+            [B_w @ C_f, A_w]
         ])
-        self.B = np.block([
-            [self.B_f],
-            [B_w @ (np.eye(self.n_u) + self.D_f)]
+        B = np.block([
+            [B_f],
+            [B_w @ (np.eye(self.n_o) + D_f)]
         ])
-        self.C = np.block([
-            [D_w @ self.C_f, C_w]
+        C = np.block([
+            [D_w @ C_f, C_w]
         ])
-        self.D = D_w @ (np.eye(self.n_u) + self.D_f)
+        D = D_w @ (np.eye(self.n_o) + D_f)
 
-        # Initiate Lyapunov Matrix P as variable
-        n = self.A.shape[0]
-        self.P   = cp.Variable((n, n),symmetric=True)
+        return A, B, C, D
+
     
-    def build_BMI(self):
+    def build_BMI(self, P, A, B, C, D, gamma):
+        """
+        Real bounded lemma BMI matrix building
+        """
+        # Ensure arrays have right dimensions
+        self._check_bmi_dims(P, A, B, C, D)
+        
         # Define the BMI matrix
-        bmi = np.block([
-            [self.A.T @ self.P @ self.A - self.P, self.A.T @ self.P @ self. B, self.C.T],
-            [self.B.T @ self.P @ self.A, self.B.T @ self.P @ self.B 
-            - self.gamma * np.eye(self.D.T.shape[0]), self.D.T],
-            [self.C, self.D, -self.gamma * np.eye(self.D.T.shape[0])]
+        BMI_mat = np.block([
+            [A.T @ P @ A - P, A.T @ P @ B, C.T],
+            [B.T @ P @ A, B.T @ P @ B - gamma * np.eye(self.n_i), D.T],
+            [C, D, - gamma * np.eye(self.n_i)]
         ])
-        return bmi
-
-    @abstract
-    def solve(self) -> BMISolution:
-        ...
+        return BMI_mat
