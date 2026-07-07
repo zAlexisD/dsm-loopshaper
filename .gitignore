@@ -1,0 +1,9 @@
+.venv
+.pytest_cache
+src/dsm_loopshaper.egg-info
+tests/__pycache__
+src/altmin/__pycache__
+src/bmi/__pycache__
+src/bmi/altmin/__pycache__
+src/bmi/fwbt/__pycache__
+src/core/__pycache__
