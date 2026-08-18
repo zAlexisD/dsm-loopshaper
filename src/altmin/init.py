@@ -11,28 +11,10 @@ FilterMatrices = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 class InitStrategy(Protocol):
     label: str
 
-    def generate(self, n: int, rng: np.random.Generator) -> list[tuple[FilterMatrices, str]]:
+    def generate(self, n: int, rng: np.random.Generator, **kwargs) -> list[tuple[FilterMatrices, str]]:
         """Return n (K = (Af, Bf, Cf, Df), label) pairs."""
         ...
 
-class WarmStartInit:
-    """Prior (Af, Bf, Cf, Df) candidate with optional Gaussian noise perturbations."""
-    label = "warm_start"
-
-    #TODO: Code in python the matlab solution that we have with white noise
-    def __init__(self, base: FilterMatrices, noise_scale: float = 0.05):
-        self.base = base
-        self.noise_scale = noise_scale
-
-    def generate(self, n: int, rng: np.random.Generator) -> list[tuple[FilterMatrices, str]]:
-        results = [(self.base, self.label)]
-        for _ in range(n - 1):
-            noisy = tuple(
-                M + rng.normal(scale=self.noise_scale, size=M.shape)
-                for M in self.base
-            )
-            results.append((noisy, self.label))
-        return results
 
 class LHSInit:
     """Latin Hypercube Sampling over (Af, Bf, Cf, Df) space."""
@@ -44,7 +26,7 @@ class LHSInit:
         self.m_out = n_outputs
         self.bound = bound
 
-    def generate(self, n: int, rng: np.random.Generator) -> list[tuple[FilterMatrices, str]]:
+    def generate(self, n: int, rng: np.random.Generator, **kwargs) -> list[tuple[FilterMatrices, str]]:
         p, m_in, m_out = self.p, self.m_in, self.m_out
         dim = p * p + p * m_out + m_in * p + m_in * m_out
         sampler = LatinHypercube(d=dim, seed=rng.integers(0, 2**31))
@@ -74,7 +56,7 @@ class ZeroInit:
         self.m_in = n_inputs
         self.m_out = n_outputs
     
-    def generate(self, n: int, rng: np.random.Generator) -> list[tuple[FilterMatrices, str]]:
+    def generate(self, n: int, rng: np.random.Generator, **kwargs) -> list[tuple[FilterMatrices, str]]:
         p, m_in, m_out = self.p, self.m_in, self.m_out
         zero = (
             np.zeros((p, p)),
@@ -90,7 +72,7 @@ class MixedInit:
     def __init__(self, strategies: list[tuple[InitStrategy, float]]): 
         self.strategies = strategies  # (strategy, weight) pairs
 
-    def generate(self, n: int, rng: np.random.Generator) -> list[tuple[np.ndarray, str]]:
+    def generate(self, n: int, rng: np.random.Generator, **kwargs) -> list[tuple[np.ndarray, str]]:
         # proportional allocation, returns (K, label) pairs
         weights = np.array([w for _, w in self.strategies], dtype=float)
         weights /= weights.sum()
@@ -101,5 +83,5 @@ class MixedInit:
         results = []
         for (strategy, _), count in zip(self.strategies, allocations):
             if count > 0:
-                results.extend(strategy.generate(count, rng))
+                results.extend(strategy.generate(count, rng, **kwargs))
         return results
