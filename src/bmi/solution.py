@@ -7,14 +7,15 @@ from scipy import signal
 
 @dataclass
 class BMISolution:
-    P: np.ndarray
-    Af: np.ndarray
-    Bf: np.ndarray
-    Cf: np.ndarray
-    Df: np.ndarray
-    gamma: float
-    feasible: bool = field(default_factory=bool)
+    P: np.ndarray | None = None
+    Pf: np.ndarray | None = None
+    Af: np.ndarray | None = None
+    Bf: np.ndarray | None = None
+    Cf: np.ndarray | None = None
+    Df: np.ndarray | None = None
+    mu: float = float("inf") 
+    feasible: bool = False
 
-    def to_statespace(self) -> signal.StateSpace:
+    def to_statespace(self,dt:float=1.0) -> signal.StateSpace:
         """Wrap filter matrices into a scipy StateSpace for analysis."""
-        return signal.StateSpace(self.A_f, self.B_f, self.C_f, self.D_f)
+        return signal.StateSpace(self.Af, self.Bf, self.Cf, self.Df,dt=dt)

@@ -5,17 +5,21 @@ import numpy as np
 from scipy import signal
 import cvxpy as cp
 
+#NOTE: Block matrixes are here defined for an IIR feedback filter in a standard DSM system, change if needed.
+
 class BMIProblem:
     def __init__(
         self,
         n_filter: int,
         n_input: int = 1,    # filter inputs
-        n_output: int = 1   # filter outputs
+        n_output: int = 1,   # filter outputs
+        gamma: float = 1.5
         ):
 
-        self.n_f = n_filter
-        self.n_i = n_input
-        self.n_o = n_output
+        self.n_f   = n_filter
+        self.n_i   = n_input
+        self.n_o   = n_output
+        self.gamma = gamma
         # Output filter order set to 4
         self.outFilterOrder = 4
         # Combined system order
@@ -27,16 +31,17 @@ class BMIProblem:
 
     def _build_output_filter(self) -> signal.StateSpace:
         """
-        Internally defined output filter.
+        Internally defined digital output filter.
         Hardcoded for now; later could accept a user-supplied StateSpace.
         """
         # Simple lowpass Butterworth filter, order 4, cutoff at pi/32
         self.outFilterOrder = 4
         cutoff = np.pi / 32
-        b, a = signal.butter(self.outFilterOrder, cutoff / np.pi, btype='low')
+        samplingRate = 1
+        b, a = signal.butter(self.outFilterOrder, cutoff / np.pi, btype='low', analog=False)
         # Convert to state space reprezentation
         A_w, B_w, C_w, D_w = signal.tf2ss(b, a)
-        return signal.StateSpace(A_w, B_w, C_w, D_w)
+        return signal.StateSpace(A_w, B_w, C_w, D_w, dt=samplingRate)
 
     # ── Dimension validation ───────────────────────────────────────
 
@@ -91,17 +96,17 @@ class BMIProblem:
         
         # Assemble block matrixes
         A = np.block([
-            [A_f, np.zeros((self.n_f,self.outFilterOrder))],
-            [B_w @ C_f, A_w]
+            [A_f, B_f @ C_w],
+            [np.zeros((self.outFilterOrder,self.n_f)), A_w]
         ])
         B = np.block([
-            [B_f],
-            [B_w @ (np.eye(self.n_i) + D_f)]
+            [B_f @ D_w],
+            [B_w]
         ])
         C = np.block([
-            [D_w @ C_f, C_w]
+            [C_f, C_w]
         ])
-        D = D_w @ (np.eye(self.n_i) + D_f)
+        D = D_w
 
         return A, B, C, D
     
@@ -119,79 +124,111 @@ class BMIProblem:
         D_w = self._output_filter.D
 
         A = cp.bmat([
-            [A_f,        np.zeros((self.n_f, self.outFilterOrder))],
-            [B_w @ C_f,  A_w]
+            [A_f, B_f @ C_w],
+            [np.zeros((self.outFilterOrder,self.n_f)), A_w]
         ])
         B = cp.vstack([
-            B_f,
-            B_w @ (np.eye(self.n_i) + D_f)
+            B_f @ D_w,
+            B_w
         ])
         C = cp.hstack([
-            D_w @ C_f,  C_w
+            C_f, C_w
         ])
-        D = D_w @ (np.eye(self.n_i) + D_f)
+        D = D_w
 
         return A, B, C, D
+    
 
-    def build_BMI(self, P, A, B, C, D, gamma):
+    def build_LMI1_cvxpy(self, P, A, B):
         """
-        Quadratic Bounded real lemma BMI matrix for plain numpy usage
-        All inputs must be numpy arrays.
-        """
-        self._check_bmi_dims(P, A, B, C, D)
+        Lyapunov LMI for H2 norm — must be > 0.
 
-        BMI_mat = np.block([
-            [A.T @ P @ A - P, A.T @ P @ B, C.T],
-            [B.T @ P @ A, B.T @ P @ B - gamma * np.eye(self.n_i), D.T],
-            [C, D, -gamma * np.eye(self.n_o)]
+        [[P, P @ A,  P @ B],
+        [A.T @ P, P, 0],
+        [B.T @ P, 0, 1]]
+
+        P is a CVXPY variable or fixed numpy array.
+        A, B are fixed numpy arrays (closed-loop).
+        """
+        n, n_i = self.n, self.n_i
+
+        return cp.bmat([
+            [P, P @ A, P @ B],
+            [A.T @ P, P, np.zeros((n, n_i))],
+            [B.T @ P, np.zeros((n_i, n)), np.eye(n_i)],
         ])
-        return BMI_mat
     
-    def build_BMI_cvxpy_P_step(self, P, A, B, C, D, gamma):
+    def build_LMI2_cvxpy(self, P, mu, C, D):
         """
-        Schur complement form of the discrete bounded real lemma for the P-step.
-        P is a CVXPY variable; A, B, C, D are fixed numpy arrays.
-        Linear in P.
+        H2 norm upper bound — must be > 0.
 
-        Equivalent to: ||H||_inf < gamma, i.e.
+        [[mu, C, D],
+        [C.T, P, 0],
+        [D.T, 0, 1]]
 
-            [A'PA - P, A'PB, C']
-            [B'PA, B'PB, D']       << 0
-
-            [C, D, -γI]
-
-        lifted via Schur complement to avoid quadratic terms.
+        mu is a CVXPY variable or scalar.
+        C, D are fixed numpy arrays (closed-loop).
         """
-        self._check_bmi_dims(P, A, B, C, D)
+        n, n_i, n_o = self.n, self.n_i, self.n_o
 
-        #TODO Check expression
         return cp.bmat([
-            [-P, np.zeros((self.n, self.n_o)), P @ A, P @ B],
-            [np.zeros((self.n_o, self.n)), -gamma*np.eye(self.n_o), C, D],
-            [A.T @ P, C.T, -P,   np.zeros((self.n, self.n_i))],
-            [B.T @ P, D.T, np.zeros((self.n_i, self.n)), -gamma*np.eye(self.n_i)]])
+            [mu * np.eye(n_o),  C, D],
+            [C.T, P, np.zeros((n, n_i))],
+            [D.T, np.zeros((n_i, n)), np.eye(n_i)],
+        ])
     
-    def build_BMI_cvxpy_K_step(self, P, A, B, C, D, gamma):
+    def build_LMI3_cvxpy(self, P_f, A_f, B_f, C_f, D_f, gamma):
         """
-        Schur complement form of the discrete bounded real lemma for the K-step.
-        P is a fixed numpy array; A, B, C, D are CVXPY expressions linear in
-        the filter variables. Every block is linear in the decision variables.
+        Bounded real lemma on feedback filter F(z) for H-inifinity constraint < 0.
 
-        Equivalent to: ||H||_inf < gamma, i.e.
-            [ A'PA - P   A'PB   C' ]
-            [ B'PA       B'PB   D' ] << 0
-            [ C          D      -γI]
-        lifted via Schur complement to avoid quadratic terms.
+        [[-Pf, Pf @ Af, Pf @ Bf, 0],
+        [Af.T @ Pf, -Pf, 0, Cf.T],
+        [Bf.T @ Pf, 0, -gamma^2, Df.T],
+        [0, Cf, Df, -1]]
+
+        Pf is a CVXPY variable or fixed numpy array.
+        Af, Bf, Cf, Df may be CVXPY expressions (K-step) or numpy (P-step).
         """
-        self._check_bmi_dims(P, A, B, C, D)
+        n_f, n_i, n_o = self.n_f, self.n_i, self.n_o
 
-        # P @ A and P @ B are linear in filter variables since P is fixed numpy
-        PA = P @ A
-        PB = P @ B
-
-        #TODO: check this expression
         return cp.bmat([
-            [-P, np.zeros((self.n, self.n_o)), PA, PB],
-            [np.zeros((self.n_o, self.n)), -gamma*np.eye(self.n_o), C, D],
-            [A.T @ P, C.T, -P,   np.zeros((self.n, self.n_i))],
-            [B.T @ P, D.T, np.zeros((self.n_i, self.n)), -gamma*np.eye(self.n_i)]])
+            [-P_f,           P_f @ A_f,            P_f @ B_f,              np.zeros((n_f, n_o))],
+            [A_f.T @ P_f,   -P_f,                  np.zeros((n_f, n_i)),   C_f.T               ],
+            [B_f.T @ P_f,    np.zeros((n_i, n_f)), -gamma**2 * np.eye(n_i), D_f.T              ],
+            [np.zeros((n_o, n_f)), C_f,             D_f,                    -np.eye(n_o)        ],
+        ])
+    
+
+    def build_LMI1(self, P, A, B):
+        """Pure numpy version for inspection and post-hoc validation."""
+        n, n_i = self.n, self.n_i
+
+        return np.block([
+            [P, P @ A, P @ B],
+            [A.T @ P, P, np.zeros((n, n_i))],
+            [B.T @ P, np.zeros((n_i, n)), np.eye(n_i)],
+        ])
+    
+    def build_LMI2(self, P, mu, C, D):
+        """Pure numpy version for inspection and post-hoc validation."""
+        n, n_i, n_o = self.n, self.n_i, self.n_o
+
+        return np.block([
+            [mu * np.eye(n_o),  C, D],
+            [C.T, P, np.zeros((n, n_i))],
+            [D.T, np.zeros((n_i, n)), np.eye(n_i)],
+        ])
+    
+    def build_LMI3(self, P_f, A_f, B_f, C_f, D_f, gamma):
+        """
+        Pure numpy version for inspection and post-hoc validation.
+        Constraint on H_inf
+        """
+        n_f, n_i, n_o = self.n_f, self.n_i, self.n_o
+
+        return np.block([
+            [-P_f,           P_f @ A_f,            P_f @ B_f,              np.zeros((n_f, n_o))],
+            [A_f.T @ P_f,   -P_f,                  np.zeros((n_f, n_i)),   C_f.T               ],
+            [B_f.T @ P_f,    np.zeros((n_i, n_f)), -gamma**2 * np.eye(n_i), D_f.T              ],
+            [np.zeros((n_o, n_f)), C_f,             D_f,                    -np.eye(n_o)        ],
+        ])
