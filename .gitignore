@@ -5,5 +5,11 @@ tests/__pycache__
 src/altmin/__pycache__
 src/bmi/__pycache__
 src/bmi/altmin/__pycache__
-src/bmi/fwbt/__pycache__
+src/dsm/__pycache__
+src/fwbt/__pycache__
 src/core/__pycache__
+src/zpk/__pycache__
+src/zpk/altmin/__pycache__
+src/utils/__pycache__
+debug/
+tests/fwbt_test_responses.png
